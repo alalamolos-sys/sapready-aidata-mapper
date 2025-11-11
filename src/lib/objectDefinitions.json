@@ -1,0 +1,187 @@
+{
+  "gl_accounts": {
+    "label": "G/L Accounts",
+    "description": "General ledger master data",
+    "requiredFields": ["Chart", "G/L Account", "Account Group", "Field Status Group"],
+    "optionalFields": ["Account Type", "Company Code", "Currency", "Short Text", "Long Text", "Open Item Managed"],
+    "fieldAliases": {
+      "Chart": ["chart", "coa", "chart of accounts"],
+      "G/L Account": ["gl account", "account", "hkont"],
+      "Account Group": ["account group", "acct group"],
+      "Field Status Group": ["field status group", "fsg"],
+      "Account Type": ["account type", "type"],
+      "Company Code": ["company code", "bukrs"],
+      "Currency": ["currency", "waers"],
+      "Short Text": ["short text", "description"],
+      "Long Text": ["long text", "text"]
+    },
+    "detection": {
+      "allOf": [["g/l account", "gl account", "account"], ["account group", "field status group"]],
+      "keywords": ["chart", "account type", "short text"]
+    },
+    "validationRules": {
+      "record": [
+        {
+          "type": "regex",
+          "field": "G/L Account",
+          "pattern": "^\\\\d{4,10}$",
+          "message": "Le compte G/L doit être numérique (4-10 chiffres)."
+        },
+        {
+          "type": "nonEmpty",
+          "field": "Field Status Group",
+          "message": "Le Field Status Group est requis pour les comptes G/L."
+        },
+        {
+          "type": "isoCurrency",
+          "field": "Currency",
+          "message": "Devise non valide (ISO-3).",
+          "severity": "warning"
+        }
+      ]
+    }
+  },
+  "opening_balances": {
+    "label": "Opening Balances",
+    "description": "Balance d'ouverture par société",
+    "requiredFields": ["Company Code", "Chart", "G/L Account", "Currency", "Posting Date", "Debit", "Credit"],
+    "optionalFields": ["Text"],
+    "fieldAliases": {
+      "Company Code": ["company", "bukrs"],
+      "Chart": ["chart", "coa"],
+      "G/L Account": ["gl account", "account"],
+      "Currency": ["currency", "waers"],
+      "Posting Date": ["posting date", "date"],
+      "Debit": ["debit", "amount debit"],
+      "Credit": ["credit", "amount credit"],
+      "Text": ["text", "description"]
+    },
+    "detection": {
+      "allOf": [["debit"], ["credit"], ["posting date"]],
+      "keywords": ["opening", "balance"]
+    },
+    "validationRules": {
+      "record": [
+        { "type": "isoCurrency", "field": "Currency", "message": "Devise non valide (ISO-3).", "severity": "warning" },
+        { "type": "nonEmpty", "field": "Posting Date", "message": "La date de comptabilisation est requise." }
+      ],
+      "aggregate": [
+        {
+          "type": "balanceBy",
+          "groupBy": ["Company Code"],
+          "debitField": "Debit",
+          "creditField": "Credit",
+          "message": "La société {group} n'est pas équilibrée (Débit {debit} / Crédit {credit})."
+        }
+      ]
+    }
+  },
+  "ytd_movements": {
+    "label": "YTD Movements",
+    "description": "Mouvements cumulatifs (Year-to-Date)",
+    "requiredFields": ["Document No", "Company Code", "Posting Date", "G/L Account", "Currency", "Amount", "D/C"],
+    "optionalFields": ["Text"],
+    "fieldAliases": {
+      "Document No": ["document", "document no", "doc"],
+      "Company Code": ["company", "bukrs"],
+      "Posting Date": ["posting date", "date"],
+      "G/L Account": ["gl account", "account"],
+      "Currency": ["currency", "waers"],
+      "Amount": ["amount", "value"],
+      "D/C": ["d/c", "dc", "debit/credit"],
+      "Text": ["text", "description"]
+    },
+    "detection": {
+      "allOf": [["document"], ["amount"], ["d/c", "dc"]],
+      "keywords": ["ytd", "movement"]
+    },
+    "validationRules": {
+      "record": [
+        { "type": "numeric", "field": "Amount", "message": "Le montant doit être numérique." },
+        { "type": "inList", "field": "D/C", "values": ["D", "C"], "message": "La colonne D/C doit contenir D ou C." }
+      ],
+      "aggregate": [
+        {
+          "type": "documentBalance",
+          "documentField": "Document No",
+          "amountField": "Amount",
+          "dcField": "D/C",
+          "message": "Le document {group} n'est pas équilibré (Débit {debit} / Crédit {credit})."
+        }
+      ]
+    }
+  },
+  "suppliers": {
+    "label": "Suppliers",
+    "description": "Fournisseurs (données BP)",
+    "requiredFields": ["Vendor", "Country", "Name1"],
+    "optionalFields": ["Street", "Postal Code", "City", "Payment Terms", "Reconciliation Account"],
+    "fieldAliases": {
+      "Vendor": ["vendor", "supplier", "lifnr"],
+      "Country": ["country", "land1"],
+      "Name1": ["name", "name1"],
+      "Payment Terms": ["payment terms", "zterm"],
+      "Reconciliation Account": ["recon account", "reconciliation"]
+    },
+    "detection": {
+      "allOf": [["vendor", "supplier"], ["name"], ["country"]],
+      "keywords": ["bp", "fournisseur"]
+    },
+    "validationRules": {
+      "record": [
+        { "type": "nonEmpty", "field": "Name1", "message": "Le nom fournisseur est requis." },
+        { "type": "isoCountry", "field": "Country", "message": "Pays non valide (ISO-2)." }
+      ]
+    }
+  },
+  "customers": {
+    "label": "Customers",
+    "description": "Clients (données BP)",
+    "requiredFields": ["Customer", "Country", "Name1"],
+    "optionalFields": ["Street", "Postal Code", "City", "Payment Terms", "Reconciliation Account"],
+    "fieldAliases": {
+      "Customer": ["customer", "kunnr"],
+      "Country": ["country", "land1"],
+      "Name1": ["name", "name1"],
+      "Payment Terms": ["payment terms", "zterm"],
+      "Reconciliation Account": ["recon account", "reconciliation"]
+    },
+    "detection": {
+      "allOf": [["customer"], ["name"], ["country"]],
+      "keywords": ["bp", "client"]
+    },
+    "validationRules": {
+      "record": [
+        { "type": "nonEmpty", "field": "Name1", "message": "Le nom client est requis." },
+        { "type": "isoCountry", "field": "Country", "message": "Pays non valide (ISO-2)." }
+      ]
+    }
+  },
+  "bank_details": {
+    "label": "Bank Details",
+    "description": "Comptes bancaires fournisseurs/clients",
+    "requiredFields": ["Vendor", "Bank Country", "Bank Key", "Account No/IBAN"],
+    "optionalFields": ["IBAN", "SWIFT/BIC", "Account Holder", "Country"],
+    "fieldAliases": {
+      "Vendor": ["vendor", "supplier", "customer", "bp"],
+      "Bank Country": ["bank country", "bank land"],
+      "Bank Key": ["bank key", "bank code"],
+      "Account No/IBAN": ["account", "iban", "account number"],
+      "IBAN": ["iban"],
+      "SWIFT/BIC": ["bic", "swift"],
+      "Account Holder": ["account holder", "holder"],
+      "Country": ["country", "land1"]
+    },
+    "detection": {
+      "allOf": [["bank"], ["iban", "bic"], ["account"]],
+      "keywords": ["bank", "swift", "bic"]
+    },
+    "validationRules": {
+      "record": [
+        { "type": "isoCountry", "field": "Bank Country", "message": "Le pays banque doit être ISO-2." },
+        { "type": "iban", "field": "IBAN", "message": "IBAN invalide.", "severity": "warning" },
+        { "type": "bic", "field": "SWIFT/BIC", "message": "BIC invalide.", "severity": "warning" }
+      ]
+    }
+  }
+}

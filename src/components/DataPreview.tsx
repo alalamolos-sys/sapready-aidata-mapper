@@ -1,6 +1,7 @@
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { ScrollArea } from '@/components/ui/scroll-area';
+import type { CsvRow } from '@/types/csv';
 import {
   Table,
   TableBody,
@@ -9,14 +10,20 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
+import { cn } from '@/lib/utils';
 
 interface DataPreviewProps {
   headers: string[];
-  rows: Record<string, any>[];
+  rows: CsvRow[];
   totalRows?: number;
+  mappedHeaders?: string[];
+  unmappedHeaders?: string[];
 }
 
-export const DataPreview = ({ headers, rows, totalRows }: DataPreviewProps) => {
+export const DataPreview = ({ headers, rows, totalRows, mappedHeaders, unmappedHeaders }: DataPreviewProps) => {
+  const mappedSet = new Set(mappedHeaders ?? []);
+  const unmappedSet = new Set(unmappedHeaders ?? []);
+
   return (
     <Card className="p-6">
       <div className="flex items-center justify-between mb-4">
@@ -31,7 +38,14 @@ export const DataPreview = ({ headers, rows, totalRows }: DataPreviewProps) => {
           <TableHeader>
             <TableRow>
               {headers.map((header, idx) => (
-                <TableHead key={idx} className="font-semibold whitespace-nowrap">
+                <TableHead
+                  key={idx}
+                  className={cn(
+                    'font-semibold whitespace-nowrap',
+                    mappedSet.has(header) && 'bg-success/10 text-success border-y border-success/30',
+                    !mappedSet.has(header) && unmappedSet.has(header) && 'bg-muted/40 text-muted-foreground',
+                  )}
+                >
                   {header}
                 </TableHead>
               ))}
@@ -41,7 +55,14 @@ export const DataPreview = ({ headers, rows, totalRows }: DataPreviewProps) => {
             {rows.map((row, rowIdx) => (
               <TableRow key={rowIdx}>
                 {headers.map((header, cellIdx) => (
-                  <TableCell key={cellIdx} className="font-mono text-xs whitespace-nowrap">
+                  <TableCell
+                    key={cellIdx}
+                    className={cn(
+                      'font-mono text-xs whitespace-nowrap',
+                      mappedSet.has(header) && 'bg-success/5',
+                      !mappedSet.has(header) && unmappedSet.has(header) && 'bg-muted/20 text-muted-foreground',
+                    )}
+                  >
                     {row[header] || '-'}
                   </TableCell>
                 ))}

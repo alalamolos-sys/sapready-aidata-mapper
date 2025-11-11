@@ -1,0 +1,3 @@
+Company Code,Chart,G/L Account,Currency,Posting Date,Debit,Credit,Text
+FR01,YCOA,101000,EUR,2025-01-01,1000,0,Ouverture caisse
+FR01,YCOA,401000,EUR,2025-01-01,0,1000,Contrepartie fournisseurs

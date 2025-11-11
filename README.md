@@ -36,6 +36,33 @@ npm i
 npm run dev
 ```
 
+## Preview the SAP Mapping Tool locally
+
+The project includes the **SAP Mapping Tool** page that lets you upload finance CSV
+extracts, inspect the detected SAP object, review data-quality warnings, and
+export LTMC-ready CSV bundles. To preview it in your browser:
+
+1. Install dependencies (skip this step if you already ran `npm i`).
+
+   ```sh
+   npm install
+   ```
+
+2. Start the Vite development server and expose it on all interfaces so you can
+   open it from a forwarded port.
+
+   ```sh
+   npm run dev -- --host 0.0.0.0 --port 5173
+   ```
+
+3. Open the forwarded port (usually `5173`) in your browser. You should see the
+   Lovable UI with a navigation entry labelled **SAP Mapping Tool**. Use that
+   section to upload your CSV files and inspect the results produced by
+   `sapreadyCore`.
+
+While the dev server is running, any changes you make to the UI or the
+`sapreadyCore` logic will hot-reload in the browser so you can iterate quickly.
+
 **Edit a file directly in GitHub**
 
 - Navigate to the desired file(s).

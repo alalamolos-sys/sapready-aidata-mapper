@@ -1,18 +1,27 @@
-/* SAPReady – core mapping & validation (TypeScript) */
+import objectDefinitionsJson from "./objectDefinitions.json";
+
 export type Header = string;
 export type Row = Record<string, unknown>;
-export type Target =
-  | "gl_accounts"
-  | "opening_balances"
-  | "ytd_movements"
-  | "suppliers"
-  | "customers"
-  | "bank_details"
-  | "unknown";
+
+export const OBJECT_TYPES = [
+  "gl_accounts",
+  "opening_balances",
+  "ytd_movements",
+  "suppliers",
+  "customers",
+  "bank_details",
+] as const;
+
+export type ObjectType = (typeof OBJECT_TYPES)[number];
+export type Target = ObjectType | "unknown";
 
 export interface MappingEntry { source: string; sap_field: string; }
 export interface MissingEntry { sap_field: string; note: string; }
-export interface Mapping { required: MappingEntry[]; optional: MappingEntry[]; missing: MissingEntry[]; }
+export interface Mapping {
+  required: MappingEntry[];
+  optional: MappingEntry[];
+  missing: MissingEntry[];
+}
 export interface Issue {
   severity: "error" | "warning" | "info";
   message: string;
@@ -22,16 +31,16 @@ export interface Issue {
 export interface ValidationResult {
   summary: { errors: number; warnings: number; infos: number };
   issues: Issue[];
+  grouped: { errors: Issue[]; warnings: Issue[]; infos: Issue[] };
 }
 export interface Sheet { name: string; columns: string[]; rows: Record<string, unknown>[] }
 
-/* ---------------- utils ---------------- */
 const ISO2 = /^[A-Z]{2}$/;
 const ISO3 = /^[A-Z]{3}$/;
 const BIC_RE = /^[A-Z0-9]{8}([A-Z0-9]{3})?$/i;
 
 export function normCountry(s: unknown) {
-  if (!s && s !== 0) return s as string | undefined;
+  if (!hasValue(s)) return s as string | undefined;
   const t = String(s).trim().toUpperCase();
   const map: Record<string, string> = {
     FRANCE: "FR",
@@ -43,12 +52,14 @@ export function normCountry(s: unknown) {
   };
   return ISO2.test(t) ? t : map[t] || t;
 }
+
 export function normCurrency(s: unknown) {
-  if (!s && s !== 0) return s as string | undefined;
+  if (!hasValue(s)) return s as string | undefined;
   const t = String(s).trim().toUpperCase();
   const map: Record<string, string> = { EURO: "EUR", DOLLAR: "USD" };
   return ISO3.test(t) ? t : map[t] || t;
 }
+
 export function validateIBAN(iban: string | undefined) {
   if (!iban) return { ok: false, reason: "empty" as const };
   const s = iban.replace(/\s+/g, "").toUpperCase();
@@ -73,233 +84,389 @@ export function validateIBAN(iban: string | undefined) {
   const ok = total === 1n;
   return { ok, reason: ok ? undefined : ("mod97" as const) };
 }
+
 export function validateBIC(bic: string | undefined) {
   if (!bic) return { ok: false, reason: "empty" as const };
   return { ok: BIC_RE.test(bic), reason: BIC_RE.test(bic) ? undefined : ("format" as const) };
 }
 
+interface DetectionDefinition {
+  allOf: string[][];
+  keywords: string[];
+}
+
+interface BaseRecordRule {
+  type: string;
+  field: string;
+  message: string;
+  severity?: Issue["severity"];
+  hint?: string;
+}
+
+type RecordRule =
+  | (BaseRecordRule & { type: "regex"; pattern: string; flags?: string })
+  | (BaseRecordRule & { type: "isoCurrency" | "isoCountry" | "iban" | "bic" | "nonEmpty" | "numeric" })
+  | (BaseRecordRule & { type: "inList"; values: string[]; caseSensitive?: boolean })
+  | (BaseRecordRule & { type: "dependency"; dependsOn: string });
+
+type AggregateRule =
+  | {
+      type: "balanceBy";
+      groupBy: string[];
+      debitField: string;
+      creditField: string;
+      message: string;
+      hint?: string;
+      severity?: Issue["severity"];
+    }
+  | {
+      type: "documentBalance";
+      documentField: string;
+      amountField: string;
+      dcField: string;
+      message: string;
+      hint?: string;
+      severity?: Issue["severity"];
+    };
+
+interface ValidationRules {
+  record?: RecordRule[];
+  aggregate?: AggregateRule[];
+}
+
+interface ObjectDefinition {
+  label: string;
+  description: string;
+  requiredFields: string[];
+  optionalFields: string[];
+  fieldAliases?: Record<string, string[]>;
+  detection?: DetectionDefinition;
+  ltmcSheets?: { name: string; columns: string[] }[];
+  validationRules?: ValidationRules;
+}
+
+const OBJECT_DEFINITIONS = objectDefinitionsJson as Record<ObjectType, ObjectDefinition>;
+
+function isKnownTarget(target: Target): target is ObjectType {
+  return target !== "unknown";
+}
+
+const toKey = (value: string) => value.trim().toLowerCase();
+
+const buildAliasMap = (definition: ObjectDefinition) => {
+  const aliases = definition.fieldAliases ?? {};
+  const allFields = new Set([...definition.requiredFields, ...definition.optionalFields]);
+  const map = new Map<string, Set<string>>();
+  for (const field of allFields) {
+    const aliasSet = new Set<string>([toKey(field)]);
+    (aliases[field] ?? []).forEach((alias) => aliasSet.add(toKey(alias)));
+    map.set(field, aliasSet);
+  }
+  return map;
+};
+
+const hasValue = (value: unknown): boolean =>
+  value !== undefined && value !== null && !(typeof value === "string" && value.trim() === "");
+
+const asNumber = (value: unknown): number => {
+  if (!hasValue(value)) return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : 0;
+};
+
+const formatMessage = (template: string, ctx: Record<string, string | number>): string =>
+  template.replace(/\{(\w+)\}/g, (_, key) => String(ctx[key] ?? ""));
+
 /* --------------- detection --------------- */
 export function detectObject(headers: Header[]): Target {
-  const H = headers.map((h) => String(h).toLowerCase());
-  const has = (k: string) => H.includes(k);
-  const any = (arr: string[]) => arr.some((a) => has(a.toLowerCase()));
-  if (any(["g/l account", "gl account", "account"]) && any(["account group", "fsg", "field status group"])) return "gl_accounts";
-  if (any(["debit"]) && any(["credit"]) && any(["posting date", "posting"])) return "opening_balances";
-  if (any(["document no", "doc no"]) && any(["d/c", "dc"])) return "ytd_movements";
-  if (any(["vendor"]) || any(["supplier"])) return "suppliers";
-  if (any(["customer"])) return "customers";
-  if (any(["iban"]) || any(["swift", "bic"])) return "bank_details";
-  return "unknown";
+  const normalizedHeaders = headers.map((h) => toKey(String(h)));
+  let best: { target: ObjectType; ratio: number; requiredCoverage: number } | undefined;
+
+  for (const target of OBJECT_TYPES) {
+    const def = OBJECT_DEFINITIONS[target];
+    const aliasMap = buildAliasMap(def);
+    const fields = Array.from(aliasMap.keys());
+    if (fields.length === 0) continue;
+
+    let matched = 0;
+    let requiredMatched = 0;
+
+    for (const field of fields) {
+      const aliases = aliasMap.get(field)!;
+      const hasMatch = normalizedHeaders.some((header) => aliases.has(header));
+      if (hasMatch) {
+        matched += 1;
+        if (def.requiredFields.includes(field)) requiredMatched += 1;
+      }
+    }
+
+    const ratio = matched / fields.length;
+    const requiredCoverage = def.requiredFields.length
+      ? requiredMatched / def.requiredFields.length
+      : 0;
+
+    if (matched === 0 || requiredCoverage < 0.5) continue;
+
+    if (!best || ratio > best.ratio || (ratio === best.ratio && requiredCoverage > best.requiredCoverage)) {
+      best = { target, ratio, requiredCoverage };
+    }
+  }
+
+  return best?.target ?? "unknown";
 }
 
 /* --------------- mapping ----------------- */
-const MAPS: Record<string, { required: Record<string, string[]>; optional: Record<string, string[]> }> = {
-  gl_accounts: {
-    required: {
-      "Chart": ["chart", "coa", "plan", "chart of accts", "chart of accounts"],
-      "G/L Account": ["g/l account", "gl account", "account", "hkont"],
-      "Account Group": ["account group", "acct group"],
-      "Account Type": ["account type", "type", "b/s", "p&l", "pl"],
-      "Short Text": ["short text", "name", "short name", "description"],
-    },
-    optional: {
-      "Company Code": ["company code", "company", "bukrs"],
-      "Currency": ["currency", "waers"],
-      "Open Item Managed": ["open item managed", "oim"],
-      "Field Status Group": ["field status group", "fsg"],
-    },
-  },
-  opening_balances: {
-    required: {
-      "Company Code": ["company code", "company", "bukrs"],
-      "Chart": ["chart", "coa", "plan"],
-      "G/L Account": ["g/l account", "gl account", "account", "hkont"],
-      "Currency": ["currency", "waers"],
-      "Posting Date": ["posting date", "date"],
-      "Debit": ["debit", "dr"],
-      "Credit": ["credit", "cr"],
-    },
-    optional: { "Text": ["text", "reference", "memo"] },
-  },
-  ytd_movements: {
-    required: {
-      "Document No": ["document no", "doc no", "document"],
-      "Company Code": ["company code", "company", "bukrs"],
-      "Posting Date": ["posting date", "date"],
-      "G/L Account": ["g/l account", "gl account", "account", "hkont"],
-      "Currency": ["currency", "waers"],
-      "Amount": ["amount", "value"],
-      "D/C": ["d/c", "dc", "debit/credit"],
-    },
-    optional: { "Text": ["text", "reference", "memo"] },
-  },
-  suppliers: {
-    required: {
-      "Vendor": ["vendor", "supplier", "lifnr", "bp number"],
-      "BP Grouping": ["bp grouping", "grouping"],
-      "Account Group": ["account group", "ktokk"],
-      "Name1": ["name1", "name", "company name"],
-      "Street": ["street", "address1"],
-      "Postal Code": ["postal code", "zip"],
-      "City": ["city", "town"],
-      "Country": ["country", "country code"],
-    },
-    optional: { "Telephone": ["telephone", "phone"], "Company Code": ["company code", "bukrs"] },
-  },
-  bank_details: {
-    required: {
-      "Vendor": ["vendor", "supplier", "lifnr"],
-      "Bank Country": ["bank country", "country"],
-      "Bank Key": ["bank key", "routing", "aba"],
-      "Account No/IBAN": ["account no", "account", "iban"],
-    },
-    optional: { "IBAN": ["iban"], "SWIFT/BIC": ["swift", "bic"], "Account Holder": ["account holder", "holder"] },
-  },
-};
-
 export function mapColumns(headers: Header[], target: Target): Mapping {
-  const spec = MAPS[target] || { required: {}, optional: {} };
-  const lower = headers.map((h) => String(h));
-  const find = (aliases: string[]) => {
-    const set = lower.map((h) => ({ src: h, key: h.toLowerCase() }));
-    const toks = aliases.map((a) => a.toLowerCase());
-    const hit = set.find((s) => toks.includes(s.key));
-    return hit?.src;
+  if (!isKnownTarget(target)) return { required: [], optional: [], missing: [] };
+  const def = OBJECT_DEFINITIONS[target];
+  const normalizedHeaders = headers.map((h) => ({ raw: String(h), key: toKey(String(h)) }));
+  const matchField = (field: string): string | undefined => {
+    const aliases = def.fieldAliases?.[field] ?? [];
+    const keys = new Set<string>([toKey(field), ...aliases.map(toKey)]);
+    return normalizedHeaders.find((header) => keys.has(header.key))?.raw;
   };
+
   const required: MappingEntry[] = [];
   const optional: MappingEntry[] = [];
   const missing: MissingEntry[] = [];
-  for (const [sap, aliases] of Object.entries(spec.required)) {
-    const src = find(aliases);
-    if (src) required.push({ source: src, sap_field: sap });
-    else missing.push({ sap_field: sap, note: "required" });
+
+  for (const field of def.requiredFields) {
+    const source = matchField(field);
+    if (source) required.push({ source, sap_field: field });
+    else missing.push({ sap_field: field, note: "required" });
   }
-  for (const [sap, aliases] of Object.entries(spec.optional)) {
-    const src = find(aliases);
-    if (src) optional.push({ source: src, sap_field: sap });
+
+  for (const field of def.optionalFields) {
+    const source = matchField(field);
+    if (source) optional.push({ source, sap_field: field });
   }
+
   return { required, optional, missing };
 }
 
 /* --------------- validation --------------- */
 export function validate({
-  target, headers, rows,
-}: { target: Target; headers: Header[]; rows: Row[]; }): ValidationResult {
+  target,
+  headers,
+  rows,
+}: {
+  target: Target;
+  headers: Header[];
+  rows: Row[];
+}): ValidationResult {
   const issues: Issue[] = [];
-  const loc = (row: number, header: string) => ({ row, source: header });
-  const add = (severity: Issue["severity"], message: string, row: number, header: string, hint?: string) =>
-    issues.push({ severity, message, location: loc(row, header), hint });
+  void headers;
+  if (!isKnownTarget(target)) return summarise(issues);
+  const def = OBJECT_DEFINITIONS[target];
+  const rules = def.validationRules;
+  const recordRules = rules?.record ?? [];
 
-  if (target === "gl_accounts") {
-    rows.forEach((r, idx) => {
-      const i = idx + 2; // + header row
-      if (!r["Chart"]) add("error", "Champ requis 'Chart' manquant.", i, "Chart", "Renseigner le plan (ex. YCOA).");
-      const cur = r["Currency"];
-      if (cur) {
-        const v = normCurrency(cur);
-        if (!ISO3.test(String(v))) add("warning", "Devise non ISO-3", i, "Currency", "Utiliser codes ISO-3 (ex. EUR, USD).");
-      }
+  const locate = (row: number, source: string) => ({ row, source });
+  const pushIssue = (rule: { severity?: Issue["severity"]; message: string; hint?: string }, row: number, source: string) => {
+    issues.push({
+      severity: rule.severity ?? "error",
+      message: rule.message,
+      hint: rule.hint,
+      location: locate(row, source),
     });
-  }
-  if (target === "opening_balances") {
-    const byCie = new Map<string, { d: number; c: number }>();
-    rows.forEach((r) => {
-      const k = String(r["Company Code"] || "");
-      const d = Number(r["Debit"] || 0), c = Number(r["Credit"] || 0);
-      const acc = byCie.get(k) || { d: 0, c: 0 };
-      acc.d += d; acc.c += c; byCie.set(k, acc);
-    });
-    for (const [k, { d, c }] of byCie) {
-      if (Math.abs(d - c) > 0.0001)
-        add("error", `Balance non équilibrée pour ${k}: debit=${d} credit=${c}`, 1, "Debit/Credit", "Ajuster les écritures d'ouverture.");
-    }
-  }
-  if (target === "ytd_movements") {
-    const byDoc = new Map<string, { d: number; c: number }>();
-    rows.forEach((r) => {
-      const doc = String(r["Document No"] || r["Doc No"] || "");
-      const amt = Number(r["Amount"] || 0);
-      const dc = String(r["D/C"] || "").toUpperCase();
-      const acc = byDoc.get(doc) || { d: 0, c: 0 };
-      if (dc === "D") acc.d += amt;
-      else if (dc === "C") acc.c += amt;
-      byDoc.set(doc, acc);
-    });
-    for (const [doc, { d, c }] of byDoc) {
-      if (Math.abs(d - c) > 0.0001)
-        add("error", `Document ${doc} déséquilibré: D=${d} C=${c}`, 1, "Amount", "Compléter la contrepartie.");
-    }
-  }
-  if (target === "bank_details" || target === "suppliers") {
-    rows.forEach((r, idx) => {
-      const i = idx + 2;
-      if (r["Country"]) {
-        const v = normCountry(r["Country"]);
-        if (!ISO2.test(String(v))) add("warning", "Pays non ISO-2", i, "Country", "Ex: FR, US, DE.");
-      }
-      if (r["IBAN"]) {
-        const res = validateIBAN(String(r["IBAN"]));
-        if (!res.ok) add("error", `IBAN invalide (${res.reason})`, i, "IBAN", "Vérifier longueur & mod97.");
-      }
-      if (r["SWIFT/BIC"]) {
-        const res = validateBIC(String(r["SWIFT/BIC"]));
-        if (!res.ok) add("error", "BIC invalide", i, "SWIFT/BIC", "8 ou 11 caractères A-Z0-9.");
-      }
-    });
-  }
-  const summary = {
-    errors: issues.filter((i) => i.severity === "error").length,
-    warnings: issues.filter((i) => i.severity === "warning").length,
-    infos: issues.filter((i) => i.severity === "info").length,
   };
-  return { summary, issues };
+
+  rows.forEach((row, idx) => {
+    const rowNumber = idx + 2; // include header row
+    for (const rule of recordRules) {
+      const value = row[rule.field];
+      switch (rule.type) {
+        case "regex": {
+          if (!hasValue(value)) break;
+          const flags = rule.flags ?? "i";
+          const regex = new RegExp(rule.pattern, flags);
+          if (!regex.test(String(value))) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "isoCurrency": {
+          if (!hasValue(value)) break;
+          const normalised = normCurrency(value);
+          if (!normalised || !ISO3.test(String(normalised))) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "isoCountry": {
+          if (!hasValue(value)) break;
+          const normalised = normCountry(value);
+          if (!normalised || !ISO2.test(String(normalised))) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "iban": {
+          if (!hasValue(value)) break;
+          const res = validateIBAN(String(value));
+          if (!res.ok) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "bic": {
+          if (!hasValue(value)) break;
+          const res = validateBIC(String(value));
+          if (!res.ok) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "nonEmpty": {
+          if (!hasValue(value)) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "numeric": {
+          if (!hasValue(value)) break;
+          const n = Number(value);
+          if (!Number.isFinite(n)) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "inList": {
+          if (!hasValue(value)) break;
+          const comparator = rule.caseSensitive ? String(value) : String(value).toUpperCase();
+          const candidates = rule.caseSensitive
+            ? rule.values
+            : rule.values.map((v) => v.toUpperCase());
+          if (!candidates.includes(comparator)) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        case "dependency": {
+          if (hasValue(row[rule.field]) && !hasValue(row[rule.dependsOn])) pushIssue(rule, rowNumber, rule.field);
+          break;
+        }
+        default:
+          break;
+      }
+    }
+  });
+
+  const aggregateRules = rules?.aggregate ?? [];
+  for (const rule of aggregateRules) {
+    switch (rule.type) {
+      case "balanceBy": {
+        const totals = new Map<string, { debit: number; credit: number }>();
+        rows.forEach((row) => {
+          const key = rule.groupBy.map((f) => String(row[f] ?? "")).join("|");
+          const current = totals.get(key) ?? { debit: 0, credit: 0 };
+          current.debit += asNumber(row[rule.debitField]);
+          current.credit += asNumber(row[rule.creditField]);
+          totals.set(key, current);
+        });
+        for (const [group, { debit, credit }] of totals) {
+          if (Math.abs(debit - credit) > 0.0001) {
+            const context = { group, debit, credit };
+            issues.push({
+              severity: rule.severity ?? "error",
+              message: formatMessage(rule.message, context),
+              hint: rule.hint,
+              location: locate(1, rule.debitField),
+            });
+          }
+        }
+        break;
+      }
+      case "documentBalance": {
+        const totals = new Map<string, { debit: number; credit: number }>();
+        rows.forEach((row) => {
+          const doc = String(row[rule.documentField] ?? "");
+          const amount = asNumber(row[rule.amountField]);
+          const dc = String(row[rule.dcField] ?? "").toUpperCase();
+          const current = totals.get(doc) ?? { debit: 0, credit: 0 };
+          if (dc === "D") current.debit += amount;
+          else if (dc === "C") current.credit += amount;
+          totals.set(doc, current);
+        });
+        for (const [group, { debit, credit }] of totals) {
+          if (Math.abs(debit - credit) > 0.0001) {
+            const context = { group, debit, credit };
+            issues.push({
+              severity: rule.severity ?? "error",
+              message: formatMessage(rule.message, context),
+              hint: rule.hint,
+              location: locate(1, rule.amountField),
+            });
+          }
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  return summarise(issues);
+}
+
+function summarise(issues: Issue[]): ValidationResult {
+  const grouped: ValidationResult["grouped"] = { errors: [], warnings: [], infos: [] };
+  for (const issue of issues) {
+    if (issue.severity === "warning") grouped.warnings.push(issue);
+    else if (issue.severity === "info") grouped.infos.push(issue);
+    else grouped.errors.push(issue);
+  }
+
+  return {
+    issues,
+    grouped,
+    summary: {
+      errors: grouped.errors.length,
+      warnings: grouped.warnings.length,
+      infos: grouped.infos.length,
+    },
+  };
 }
 
 /* --------------- shaping LTMC --------------- */
 export function shapeLTMC({
-  target, headers, rows, mapping, userHints,
-}: { target: Target; headers: Header[]; rows: Row[]; mapping: Mapping; userHints?: Record<string, unknown>; }): { sheets: Sheet[] } {
-  const pick = (r: Row, cols: string[]) => Object.fromEntries(cols.map((c) => [c, r[c] ?? ""]));
+  target,
+  headers,
+  rows,
+  mapping,
+  userHints,
+}: {
+  target: Target;
+  headers: Header[];
+  rows: Row[];
+  mapping: Mapping;
+  userHints?: Record<string, unknown>;
+}): { sheets: Sheet[] } {
+  void headers;
+  void userHints;
 
-  if (target === "gl_accounts") {
-    const s1Cols = ["Chart", "G/L Account", "Account Group", "Account Type", "Short Text"];
-    const s2Cols = ["G/L Account", "Company Code", "Currency", "Open Item Managed", "Field Status Group"];
-    return {
-      sheets: [
-        { name: "GL_Chart", columns: s1Cols, rows: rows.map((r) => pick(r, s1Cols)) },
-        { name: "GL_CompanyCode", columns: s2Cols, rows: rows.map((r) => pick(r, s2Cols)) },
-      ],
-    };
-  }
-  if (target === "opening_balances") {
-    const cols = ["Company Code", "Chart", "G/L Account", "Currency", "Posting Date", "Debit", "Credit", "Text"];
-    return { sheets: [{ name: "GL_Balances", columns: cols, rows: rows.map((r) => pick(r, cols)) }] };
-  }
-  if (target === "ytd_movements") {
-    const cols = ["Document No", "Company Code", "Posting Date", "G/L Account", "Currency", "Amount", "D/C", "Text"];
-    return { sheets: [{ name: "GL_Postings", columns: cols, rows: rows.map((r) => pick(r, cols)) }] };
-  }
-  if (target === "suppliers") {
-    const gen = ["Vendor", "BP Grouping", "Account Group", "Name1", "Street", "Postal Code", "City", "Country", "Telephone"];
-    const cc = ["Vendor", "Company Code", "Reconciliation Account", "Payment Terms", "Payment Methods"];
-    const bank = ["Vendor", "Bank Country", "Bank Key", "Account No/IBAN", "IBAN", "SWIFT/BIC", "Account Holder"];
-    return {
-      sheets: [
-        { name: "BP_General (Vendor)", columns: gen, rows: rows.map((r) => pick(r, gen)) },
-        { name: "BP_CompanyCode (Vendor)", columns: cc, rows: rows.map((r) => pick(r, cc)) },
-        { name: "BP_Bank", columns: bank, rows: rows.map((r) => pick(r, bank)) },
-      ],
-    };
-  }
-  if (target === "customers") {
-    const gen = ["Customer", "BP Grouping", "Account Group", "Name1", "Street", "Postal Code", "City", "Country", "Telephone"];
-    const cc = ["Customer", "Company Code", "Reconciliation Account", "Payment Terms"];
-    return {
-      sheets: [
-        { name: "BP_General (Customer)", columns: gen, rows: rows.map((r) => pick(r, gen)) },
-        { name: "BP_CompanyCode (Customer)", columns: cc, rows: rows.map((r) => pick(r, cc)) },
-      ],
-    };
-  }
-  return { sheets: [] };
+  if (!isKnownTarget(target)) return { sheets: [] };
+  const def = OBJECT_DEFINITIONS[target];
+  const mappedFields = [...mapping.required, ...mapping.optional];
+  const mappedFieldNames = new Set<string>(mappedFields.map((entry) => entry.sap_field));
+
+  const orderedColumns: string[] = [];
+  const pushUnique = (field: string) => {
+    if (!orderedColumns.includes(field)) orderedColumns.push(field);
+  };
+
+  def.requiredFields.forEach(pushUnique);
+  mappedFields.forEach((entry) => pushUnique(entry.sap_field));
+  def.optionalFields
+    .filter((field) => mappedFieldNames.has(field))
+    .forEach(pushUnique);
+
+  if (orderedColumns.length === 0) return { sheets: [] };
+
+  const columnToSource = new Map<string, string>();
+  mappedFields.forEach((entry) => columnToSource.set(entry.sap_field, entry.source));
+
+  const sheetName = `${def.label} (${orderedColumns.length} colonnes)`;
+  const sheetRows = rows.map((row) => {
+    const shaped: Record<string, unknown> = {};
+    orderedColumns.forEach((column) => {
+      const source = columnToSource.get(column);
+      shaped[column] = source ? row[source] ?? "" : "";
+    });
+    return shaped;
+  });
+
+  const sheets: Sheet[] = [
+    {
+      name: sheetName,
+      columns: orderedColumns,
+      rows: sheetRows,
+    },
+  ];
+
+  return { sheets };
 }
