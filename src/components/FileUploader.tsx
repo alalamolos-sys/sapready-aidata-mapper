@@ -1,19 +1,84 @@
-import { useState, useCallback } from 'react';
-import { Upload, FileSpreadsheet, X } from 'lucide-react';
+import { useState, useCallback, useRef, useEffect } from 'react';
+import Papa from 'papaparse';
+import { Upload, FileSpreadsheet, X, Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { toast } from 'sonner';
+import type { CsvRow } from '@/types/csv';
 
-interface FileUploaderProps {
-  onFileProcessed: (data: any) => void;
+export interface ProcessedFileData {
+  filename: string;
+  headers: string[];
+  rows: CsvRow[];
+  sampleRows: CsvRow[];
+  rowCount: number;
+  uploadedAt: Date;
+  size: number;
 }
 
-export const FileUploader = ({ onFileProcessed }: FileUploaderProps) => {
-  const [isDragging, setIsDragging] = useState(false);
-  const [file, setFile] = useState<File | null>(null);
+interface FileUploaderProps {
+  onFileProcessed: (data: ProcessedFileData | null) => void;
+  activeFile?: ProcessedFileData | null;
+}
 
-  const handleDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
+const ACCEPTED_FORMAT = /\.csv$/i;
+
+async function parseCsv(file: File): Promise<{ headers: string[]; rows: CsvRow[] }> {
+  return new Promise((resolve, reject) => {
+    Papa.parse(file, {
+      header: true,
+      skipEmptyLines: 'greedy',
+      transformHeader: (header) => header.trim(),
+      beforeFirstChunk: (chunk) => chunk.replace(/^\ufeff/, ''),
+      delimitersToGuess: [',', ';', '\t', '|'],
+      complete: (result) => {
+        try {
+          const rows = (result.data as CsvRow[]).map((row) => {
+            const cleaned: CsvRow = {};
+            Object.entries(row as Record<string, unknown>).forEach(([key, value]) => {
+              if (typeof value === 'string') {
+                cleaned[key] = value.trim();
+              } else if (
+                typeof value === 'number' ||
+                typeof value === 'boolean' ||
+                value === null ||
+                typeof value === 'undefined'
+              ) {
+                cleaned[key] = value;
+              } else {
+                cleaned[key] = String(value ?? '').trim();
+              }
+            });
+            return cleaned;
+          });
+
+          const headers = result.meta.fields ?? Object.keys(rows[0] ?? {});
+          resolve({ headers, rows });
+        } catch (error) {
+          reject(error);
+        }
+      },
+      error: reject,
+    });
+  });
+}
+
+export const FileUploader = ({ onFileProcessed, activeFile = null }: FileUploaderProps) => {
+  const [isDragging, setIsDragging] = useState(false);
+  const [fileInfo, setFileInfo] = useState<{ name: string; size: number } | null>(null);
+  const [isProcessing, setIsProcessing] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+
+  useEffect(() => {
+    if (activeFile) {
+      setFileInfo({ name: activeFile.filename, size: activeFile.size });
+    } else {
+      setFileInfo(null);
+    }
+  }, [activeFile]);
+
+  const handleDragOver = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
     setIsDragging(true);
   }, []);
 
@@ -21,113 +86,151 @@ export const FileUploader = ({ onFileProcessed }: FileUploaderProps) => {
     setIsDragging(false);
   }, []);
 
-  const processFile = useCallback((selectedFile: File) => {
-    if (!selectedFile.name.match(/\.(xlsx?|csv)$/i)) {
+  const processFile = useCallback(async (selectedFile: File) => {
+    if (isProcessing) {
+      return;
+    }
+
+    if (!ACCEPTED_FORMAT.test(selectedFile.name)) {
       toast.error('Format non supporté', {
-        description: 'Veuillez uploader un fichier Excel (.xlsx, .xls) ou CSV.'
+        description: 'Veuillez uploader un fichier CSV (séparateur virgule ou point-virgule).',
       });
       return;
     }
 
-    setFile(selectedFile);
-    
-    // Simulation: parse basic data
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      const mockData = {
-        filename: selectedFile.name,
-        headers: ['Account', 'Acct Group', 'Type', 'Short Name', 'Company', 'Currency', 'OIM', 'FSG'],
-        sample_rows: [
-          { Account: '101100', 'Acct Group': 'ACTV', Type: 'B/S', 'Short Name': 'Cash', Company: 'FR01', Currency: 'EUR', OIM: 'N', FSG: 'YB00' },
-          { Account: '101200', 'Acct Group': 'ACTV', Type: 'B/S', 'Short Name': 'Bank', Company: 'FR01', Currency: 'EUR', OIM: 'Y', FSG: 'YB01' },
-          { Account: '400100', 'Acct Group': 'REVN', Type: 'P&L', 'Short Name': 'Sales', Company: 'FR01', Currency: 'EUR', OIM: 'N', FSG: 'YP00' }
-        ],
-        rowCount: 3
-      };
-      
-      onFileProcessed(mockData);
-      toast.success('Fichier chargé', {
-        description: `${mockData.rowCount} lignes détectées`
-      });
-    };
-    reader.readAsText(selectedFile);
-  }, [onFileProcessed]);
+    setIsProcessing(true);
 
-  const handleDrop = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setIsDragging(false);
-    
-    const droppedFile = e.dataTransfer.files[0];
-    if (droppedFile) {
-      processFile(droppedFile);
+    try {
+      const { headers, rows } = await parseCsv(selectedFile);
+
+      if (!headers.length) {
+        toast.error('Aucune colonne détectée', {
+          description: 'Vérifiez la ligne d’en-tête de votre fichier CSV.',
+        });
+        onFileProcessed(null);
+        return;
+      }
+
+      setFileInfo({ name: selectedFile.name, size: selectedFile.size });
+
+      const processed: ProcessedFileData = {
+        filename: selectedFile.name,
+        headers,
+        rows,
+        sampleRows: rows.slice(0, 20),
+        rowCount: rows.length,
+        uploadedAt: new Date(),
+        size: selectedFile.size,
+      };
+
+      onFileProcessed(processed);
+
+      toast.success('Fichier importé', {
+        description: `${processed.rowCount} lignes analysées`,
+      });
+      } catch (error) {
+        console.error(error);
+        toast.error('Erreur lors de la lecture du fichier', {
+          description: error instanceof Error ? error.message : 'Vérifiez le format du CSV.',
+        });
+        onFileProcessed(null);
+        setFileInfo(null);
+      } finally {
+      setIsProcessing(false);
     }
+  }, [isProcessing, onFileProcessed]);
+
+  const handleDrop = useCallback((event: React.DragEvent) => {
+    event.preventDefault();
+    setIsDragging(false);
+
+    const droppedFile = event.dataTransfer.files[0];
+    if (droppedFile) {
+      void processFile(droppedFile);
+    }
+    event.dataTransfer.clearData();
   }, [processFile]);
 
-  const handleFileSelect = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
-    const selectedFile = e.target.files?.[0];
+  const handleFileSelect = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const selectedFile = event.target.files?.[0];
     if (selectedFile) {
-      processFile(selectedFile);
+      void processFile(selectedFile);
     }
+    event.target.value = '';
   }, [processFile]);
 
   const removeFile = useCallback(() => {
-    setFile(null);
+    setFileInfo(null);
     onFileProcessed(null);
   }, [onFileProcessed]);
 
   return (
-    <Card className="p-6 border-2 border-dashed transition-all duration-300"
-          style={{
-            borderColor: isDragging ? 'hsl(var(--primary))' : 'hsl(var(--border))',
-            background: isDragging ? 'hsl(var(--primary) / 0.05)' : 'hsl(var(--card))'
-          }}>
-      {!file ? (
+    <Card
+      className="p-6 border-2 border-dashed transition-all duration-300"
+      style={{
+        borderColor: isDragging ? 'hsl(var(--primary))' : 'hsl(var(--border))',
+        background: isDragging ? 'hsl(var(--primary) / 0.05)' : 'hsl(var(--card))',
+      }}
+    >
+      {!fileInfo ? (
         <div
           onDragOver={handleDragOver}
           onDragLeave={handleDragLeave}
           onDrop={handleDrop}
-          className="flex flex-col items-center justify-center py-12 cursor-pointer"
+          className="flex flex-col items-center justify-center py-12 cursor-pointer text-center"
         >
           <Upload className="w-12 h-12 mb-4 text-muted-foreground" />
           <h3 className="text-lg font-semibold mb-2">
-            Glissez-déposez votre fichier
+            Glissez-déposez votre fichier CSV
           </h3>
           <p className="text-sm text-muted-foreground mb-4">
-            Excel (.xlsx, .xls) ou CSV
+            Lignes d’en-tête requises, séparateur virgule ou point-virgule
           </p>
           <input
+            ref={inputRef}
             type="file"
             id="file-upload"
             className="hidden"
-            accept=".xlsx,.xls,.csv"
+            accept=".csv"
             onChange={handleFileSelect}
           />
-          <label htmlFor="file-upload">
-            <Button asChild>
-              <span>Parcourir les fichiers</span>
-            </Button>
-          </label>
+          <Button
+            type="button"
+            disabled={isProcessing}
+            onClick={() => inputRef.current?.click()}
+          >
+            {isProcessing ? 'Analyse en cours...' : 'Parcourir les fichiers'}
+          </Button>
         </div>
       ) : (
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="p-2 rounded-lg bg-primary/10">
-              <FileSpreadsheet className="w-6 h-6 text-primary" />
+        <div className="flex flex-col gap-4">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="p-2 rounded-lg bg-primary/10">
+                <FileSpreadsheet className="w-6 h-6 text-primary" />
+              </div>
+              <div>
+                <p className="font-medium">{fileInfo.name}</p>
+                <p className="text-sm text-muted-foreground">
+                  {(fileInfo.size / 1024).toFixed(2)} KB
+                </p>
+              </div>
             </div>
-            <div>
-              <p className="font-medium">{file.name}</p>
-              <p className="text-sm text-muted-foreground">
-                {(file.size / 1024).toFixed(2)} KB
-              </p>
-            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={removeFile}
+            >
+              <X className="w-4 h-4" />
+            </Button>
           </div>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={removeFile}
-          >
-            <X className="w-4 h-4" />
-          </Button>
+
+          {isProcessing && (
+            <div className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              <span>Analyse en cours…</span>
+            </div>
+          )}
         </div>
       )}
     </Card>
