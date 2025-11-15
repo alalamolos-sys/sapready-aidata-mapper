@@ -5,6 +5,7 @@ import { componentTagger } from "lovable-tagger";
 
 // https://vitejs.dev/config/
 export default defineConfig(({ mode }) => ({
+  base: "/sapready-aidata-mapper/",
   server: {
     host: "::",
     port: 8080,
@@ -13,6 +14,9 @@ export default defineConfig(({ mode }) => ({
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
+      jszip: path.resolve(__dirname, "./vendor/jszip"),
+      papaparse: path.resolve(__dirname, "./vendor/papaparse"),
+      "file-saver": path.resolve(__dirname, "./vendor/file-saver"),
     },
   },
 }));
